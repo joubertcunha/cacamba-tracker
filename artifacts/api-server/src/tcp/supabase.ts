@@ -20,28 +20,44 @@ function getClient(): SupabaseClient {
   return client;
 }
 
-async function findCaminhaoId(
-  supabase: SupabaseClient,
-  imei: string
-): Promise<number | null> {
-  const { data, error } = await supabase
-    .from("caminhao_localizacao_atual")
-    .select("caminhao_id")
-    .eq("imei", imei)
-    .not("caminhao_id", "is", null)
-    .limit(1)
-    .maybeSingle();
+/**
+ * Resolve o caminhao_id para um IMEI.
+ * Ordem de prioridade:
+ * 1. Mapeamento por IMEI via env: IMEI_MAP=IMEI1:uuid1,IMEI2:uuid2
+ * 2. ID padrão via env: CAMINHAO_ID_DEFAULT=uuid
+ */
+function resolveCaminhaoId(imei: string): string | null {
+  const imeiMap = process.env["IMEI_MAP"] ?? "";
+  if (imeiMap) {
+    for (const entry of imeiMap.split(",")) {
+      const [mappedImei, caminhaoId] = entry.split(":");
+      if (mappedImei?.trim() === imei && caminhaoId?.trim()) {
+        return caminhaoId.trim();
+      }
+    }
+  }
 
-  if (error || !data) return null;
-  return (data as { caminhao_id: number }).caminhao_id;
+  const defaultId = process.env["CAMINHAO_ID_DEFAULT"] ?? "";
+  if (defaultId) return defaultId.trim();
+
+  return null;
 }
 
 export async function saveLocalizacao(data: ParsedGpsData): Promise<void> {
   const supabase = getClient();
 
-  const caminhao_id = await findCaminhaoId(supabase, data.imei);
+  const caminhao_id = resolveCaminhaoId(data.imei);
 
-  const record: Record<string, unknown> = {
+  if (!caminhao_id) {
+    logger.warn(
+      { imei: data.imei },
+      "caminhao_id não configurado para este IMEI. Defina IMEI_MAP ou CAMINHAO_ID_DEFAULT no .env"
+    );
+    throw new Error("caminhao_id não resolvido para IMEI: " + data.imei);
+  }
+
+  const record = {
+    caminhao_id,
     imei: data.imei,
     latitude: data.latitude,
     longitude: data.longitude,
@@ -51,28 +67,17 @@ export async function saveLocalizacao(data: ParsedGpsData): Promise<void> {
     atualizado_em: new Date().toISOString(),
   };
 
-  if (caminhao_id !== null) {
-    record["caminhao_id"] = caminhao_id;
-  }
-
   const { error } = await supabase
     .from("caminhao_localizacao_atual")
     .insert(record);
 
   if (error) {
-    if (error.code === "23502") {
-      logger.warn(
-        { imei: data.imei },
-        "caminhao_id obrigatório e não encontrado para este IMEI. Execute o SQL de migração para tornar a coluna nullable."
-      );
-    } else {
-      logger.error({ error, imei: data.imei }, "Erro ao inserir localização");
-    }
+    logger.error({ error, imei: data.imei }, "Erro ao inserir localização");
     throw error;
   }
 
   logger.info(
-    { imei: data.imei, lat: data.latitude, lon: data.longitude, vel: data.velocidade },
+    { imei: data.imei, caminhao_id, lat: data.latitude, lon: data.longitude, vel: data.velocidade },
     "Localização salva com sucesso"
   );
 }
