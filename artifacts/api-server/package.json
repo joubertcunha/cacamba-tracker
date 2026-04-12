@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "cross-env NODE_ENV=development node ./build.mjs && node --enable-source-maps --env-file=.env ./dist/index.mjs",
+    "dev": "cross-env NODE_ENV=development node ./build.mjs && node --enable-source-maps --env-file-if-exists=.env ./dist/index.mjs",
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
