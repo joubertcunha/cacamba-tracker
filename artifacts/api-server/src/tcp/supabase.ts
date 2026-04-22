@@ -43,6 +43,66 @@ function resolveCaminhaoId(imei: string): string | null {
   return null;
 }
 
+async function upsertLocalizacaoAtual(
+  supabase: SupabaseClient,
+  data: ParsedGpsData,
+  caminhao_id: string
+): Promise<void> {
+  const agora = new Date().toISOString();
+
+  const record = {
+    caminhao_id,
+    imei: data.imei,
+    latitude: data.latitude,
+    longitude: data.longitude,
+    velocidade: data.velocidade ?? null,
+    data_gps: data.data_gps ? data.data_gps.toISOString() : null,
+    data_recebimento: agora,
+    atualizado_em: agora,
+    raw_data: data.raw_data,
+  };
+
+  const { error } = await supabase
+    .from("caminhao_localizacao_atual")
+    .upsert(record, { onConflict: "caminhao_id" });
+
+  if (error) {
+    logger.error({ error, imei: data.imei }, "Erro ao atualizar localização atual");
+    throw error;
+  }
+
+  logger.info({ imei: data.imei, caminhao_id }, "Localização atual atualizada");
+}
+
+async function insertLocalizacaoHistorico(
+  supabase: SupabaseClient,
+  data: ParsedGpsData
+): Promise<void> {
+  const agora = new Date().toISOString();
+
+  const record = {
+    imei: data.imei,
+    latitude: data.latitude,
+    longitude: data.longitude,
+    velocidade: data.velocidade ?? null,
+    data_gps: data.data_gps ? data.data_gps.toISOString() : null,
+    data_recebimento: agora,
+    atualizado_em: agora,
+    raw_data: data.raw_data,
+  };
+
+  const { error } = await supabase
+    .from("caminhao_localizacao_historico")
+    .insert(record);
+
+  if (error) {
+    logger.error({ error, imei: data.imei }, "Erro ao inserir no histórico");
+    throw error;
+  }
+
+  logger.info({ imei: data.imei }, "Histórico inserido");
+}
+
 export async function saveLocalizacao(data: ParsedGpsData): Promise<void> {
   const supabase = getClient();
 
@@ -56,28 +116,23 @@ export async function saveLocalizacao(data: ParsedGpsData): Promise<void> {
     throw new Error("caminhao_id não resolvido para IMEI: " + data.imei);
   }
 
-  const record = {
-    caminhao_id,
-    imei: data.imei,
-    latitude: data.latitude,
-    longitude: data.longitude,
-    velocidade: data.velocidade ?? null,
-    data_gps: data.data_gps ? data.data_gps.toISOString() : null,
-    raw_data: data.raw_data,
-    atualizado_em: new Date().toISOString(),
-  };
+  const [atualResult, historicoResult] = await Promise.allSettled([
+    upsertLocalizacaoAtual(supabase, data, caminhao_id),
+    insertLocalizacaoHistorico(supabase, data),
+  ]);
 
-  const { error } = await supabase
-    .from("caminhao_localizacao_atual")
-    .insert(record);
-
-  if (error) {
-    logger.error({ error, imei: data.imei }, "Erro ao inserir localização");
-    throw error;
+  if (atualResult.status === "rejected") {
+    logger.error({ err: atualResult.reason, imei: data.imei }, "Falha ao salvar localização atual");
   }
 
-  logger.info(
-    { imei: data.imei, caminhao_id, lat: data.latitude, lon: data.longitude, vel: data.velocidade },
-    "Localização salva com sucesso"
-  );
+  if (historicoResult.status === "rejected") {
+    logger.error({ err: historicoResult.reason, imei: data.imei }, "Falha ao salvar histórico");
+  }
+
+  if (atualResult.status === "fulfilled" && historicoResult.status === "fulfilled") {
+    logger.info(
+      { imei: data.imei, lat: data.latitude, lon: data.longitude, vel: data.velocidade },
+      "Localização salva em atual e histórico"
+    );
+  }
 }
