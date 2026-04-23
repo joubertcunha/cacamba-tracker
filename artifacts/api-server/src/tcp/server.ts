@@ -3,6 +3,9 @@ import { logger } from "../lib/logger";
 import { parseGpsMessage } from "./parser";
 import { saveLocalizacao } from "./supabase";
 
+// Pacote de login: ##,imei:IMEI,A;
+const LOGIN_REGEX = /^##,imei:(\d+),A;?$/;
+
 export function startTcpServer(port: number): net.Server {
   const server = net.createServer();
 
@@ -20,20 +23,30 @@ export function startTcpServer(port: number): net.Server {
 
       logger.info({ remoteAddr, bytes: chunk.length, raw: raw.trim() }, "TCP: pacote recebido (raw)");
 
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
+      // Separa por \n ou por ; (alguns firmwares não enviam \n após o login)
+      const lines = buffer.split(/[\n;]/).map((l) => l.trim()).filter(Boolean);
+
+      // Mantém no buffer apenas o que não terminou com \n ou ;
+      const lastChar = buffer[buffer.length - 1];
+      buffer = lastChar === "\n" || lastChar === ";" ? "" : (lines.pop() ?? "");
 
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
+        logger.info({ remoteAddr, packet: line }, "TCP: processando pacote");
 
-        logger.info({ remoteAddr, packet: trimmed }, "TCP: processando pacote");
+        // ── Pacote de login ──────────────────────────────────────────
+        const loginMatch = line.match(LOGIN_REGEX);
+        if (loginMatch) {
+          const imei = loginMatch[1];
+          logger.info({ remoteAddr, imei }, "TCP: pacote de LOGIN recebido — respondendo LOAD");
+          socket.write("LOAD");
+          continue;
+        }
 
-        const parsed = parseGpsMessage(trimmed);
+        // ── Pacote de localização ────────────────────────────────────
+        const parsed = parseGpsMessage(line);
 
         if (!parsed) {
-          logger.warn({ remoteAddr, packet: trimmed }, "TCP: formato não reconhecido — respondendo ON mesmo assim");
-          socket.write("ON");
+          logger.warn({ remoteAddr, packet: line }, "TCP: formato não reconhecido — ignorado");
           continue;
         }
 
@@ -46,10 +59,10 @@ export function startTcpServer(port: number): net.Server {
             vel: parsed.velocidade,
             data_gps: parsed.data_gps,
           },
-          "TCP: pacote GPS válido"
+          "TCP: pacote GPS válido — respondendo ON"
         );
 
-        // Responde ao rastreador ANTES de salvar no banco para não bloquear
+        // Responde ao rastreador antes de salvar para não bloquear
         socket.write("ON");
 
         try {
@@ -57,11 +70,6 @@ export function startTcpServer(port: number): net.Server {
         } catch (err) {
           logger.error({ err, imei: parsed.imei }, "TCP: erro ao salvar no banco");
         }
-      }
-
-      // Se ainda tem conteúdo no buffer sem \n, loga para diagnóstico
-      if (buffer.trim()) {
-        logger.debug({ remoteAddr, buffer_pendente: buffer }, "TCP: buffer aguardando mais dados");
       }
     });
 
