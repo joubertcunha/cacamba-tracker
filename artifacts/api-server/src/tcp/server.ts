@@ -12,10 +12,13 @@ export function startTcpServer(port: number): net.Server {
 
     let buffer = "";
 
-    socket.setTimeout(60000);
+    socket.setTimeout(120000);
 
     socket.on("data", async (chunk) => {
-      buffer += chunk.toString("utf8");
+      const raw = chunk.toString("utf8");
+      buffer += raw;
+
+      logger.info({ remoteAddr, bytes: chunk.length, raw: raw.trim() }, "TCP: pacote recebido (raw)");
 
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
@@ -24,14 +27,30 @@ export function startTcpServer(port: number): net.Server {
         const trimmed = line.trim();
         if (!trimmed) continue;
 
-        logger.info({ remoteAddr, raw: trimmed }, "TCP: dados recebidos");
+        logger.info({ remoteAddr, packet: trimmed }, "TCP: processando pacote");
 
         const parsed = parseGpsMessage(trimmed);
 
         if (!parsed) {
-          logger.warn({ remoteAddr, raw: trimmed }, "TCP: mensagem inválida ignorada");
+          logger.warn({ remoteAddr, packet: trimmed }, "TCP: formato não reconhecido — respondendo ON mesmo assim");
+          socket.write("ON");
           continue;
         }
+
+        logger.info(
+          {
+            remoteAddr,
+            imei: parsed.imei,
+            lat: parsed.latitude,
+            lon: parsed.longitude,
+            vel: parsed.velocidade,
+            data_gps: parsed.data_gps,
+          },
+          "TCP: pacote GPS válido"
+        );
+
+        // Responde ao rastreador ANTES de salvar no banco para não bloquear
+        socket.write("ON");
 
         try {
           await saveLocalizacao(parsed);
@@ -39,10 +58,15 @@ export function startTcpServer(port: number): net.Server {
           logger.error({ err, imei: parsed.imei }, "TCP: erro ao salvar no banco");
         }
       }
+
+      // Se ainda tem conteúdo no buffer sem \n, loga para diagnóstico
+      if (buffer.trim()) {
+        logger.debug({ remoteAddr, buffer_pendente: buffer }, "TCP: buffer aguardando mais dados");
+      }
     });
 
     socket.on("timeout", () => {
-      logger.warn({ remoteAddr }, "TCP: conexão encerrada por timeout");
+      logger.warn({ remoteAddr }, "TCP: conexão encerrada por timeout (120s sem dados)");
       socket.destroy();
     });
 
