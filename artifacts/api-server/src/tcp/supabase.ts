@@ -26,43 +26,28 @@ async function upsertLocalizacaoAtual(
 ): Promise<void> {
   const agora = new Date().toISOString();
 
-  const fields = {
-    latitude: data.latitude,
-    longitude: data.longitude,
-    velocidade: data.velocidade ?? null,
-    data_gps: data.data_gps ? data.data_gps.toISOString() : null,
-    data_recebimento: agora,
-    atualizado_em: agora,
-    raw_data: data.raw_data,
-  };
-
-  // Tenta atualizar primeiro
-  const { count, error: updateError } = await supabase
+  const { error } = await supabase
     .from("caminhao_localizacao_atual")
-    .update(fields)
-    .eq("imei", data.imei)
-    .select("imei", { count: "exact", head: true });
+    .upsert(
+      {
+        imei: data.imei,
+        latitude: data.latitude,
+        longitude: data.longitude,
+        velocidade: data.velocidade ?? null,
+        data_gps: data.data_gps ? data.data_gps.toISOString() : null,
+        data_recebimento: agora,
+        atualizado_em: agora,
+        raw_data: data.raw_data,
+      },
+      { onConflict: "imei" }
+    );
 
-  if (updateError) {
-    logger.error({ error: updateError, imei: data.imei }, "Erro ao atualizar localização atual");
-    throw updateError;
+  if (error) {
+    logger.error({ error, imei: data.imei }, "Erro ao upsert localização atual");
+    throw error;
   }
 
-  // Se não existia registro, insere
-  if (!count || count === 0) {
-    const { error: insertError } = await supabase
-      .from("caminhao_localizacao_atual")
-      .insert({ imei: data.imei, ...fields });
-
-    if (insertError) {
-      logger.error({ error: insertError, imei: data.imei }, "Erro ao inserir localização atual");
-      throw insertError;
-    }
-
-    logger.info({ imei: data.imei }, "Localização atual inserida (novo registro)");
-  } else {
-    logger.info({ imei: data.imei }, "Localização atual atualizada");
-  }
+  logger.info({ imei: data.imei }, "Localização atual atualizada (upsert)");
 }
 
 async function insertLocalizacaoHistorico(
