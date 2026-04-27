@@ -2,3 +2,4 @@ github_actions_*
 .env
 .env.*
 node_modules
+
