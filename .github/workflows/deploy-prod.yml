@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout código
+      - name: Checkout codigo
         uses: actions/checkout@v4
 
       - name: Login Docker Hub
@@ -27,7 +27,7 @@ jobs:
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/cacamba-tracker:prod
-            ${{ secrets.DOCKERHUB_USERNAME }}/cacamba-tracker:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/cacamba-tracker:prod-${{ github.sha }}
 
   deploy:
     needs: build-and-push
