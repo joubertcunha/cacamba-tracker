@@ -67,10 +67,11 @@ const PROTOCOL_LOGIN       = 0x01;
 const PROTOCOL_GPS         = 0x22;
 const PROTOCOL_HEARTBEAT   = 0x23;
 const PROTOCOL_STATUS_INFO = 0x13; // bateria, sinal GSM, alarme
-const PROTOCOL_GPS_LBS_1   = 0x10; // GPS+LBS (variante)
-const PROTOCOL_GPS_LBS_2   = 0x11; // GPS+LBS (variante)
-const PROTOCOL_ALARM       = 0x16; // alarme/alerta
-const PROTOCOL_GPS_2       = 0x26; // GPS (variante de alguns firmwares)
+const PROTOCOL_GPS_LBS_1    = 0x10; // GPS+LBS (variante)
+const PROTOCOL_GPS_LBS_2    = 0x11; // GPS+LBS (variante)
+const PROTOCOL_GPS_LBS_MIX  = 0x12; // GPS+LBS misto — J14 4G (bits 14/12/11)
+const PROTOCOL_ALARM        = 0x16; // alarme/alerta
+const PROTOCOL_GPS_2        = 0x26; // GPS (variante de alguns firmwares)
 
 // ── Estado por conexão ────────────────────────────────────────────────────────
 
@@ -237,12 +238,66 @@ function processGT06Packet(
       break;
     }
 
-    // ── GPS+LBS combinado (variantes 0x10 e 0x11) ───────────────────
+    // ── GPS+LBS misto 0x12 — J14 4G (bits 14=fix, 12=latSul, 11=lonOeste) ──
+    case PROTOCOL_GPS_LBS_MIX: {
+      // Layout idêntico ao 0x22 até o byte de speed; apenas courseStatus usa bits diferentes
+      const year    = 2000 + packet[4]!;
+      const month   = packet[5]!;
+      const day     = packet[6]!;
+      const hour    = packet[7]!;
+      const minute  = packet[8]!;
+      const second  = packet[9]!;
+      // [10] GPS info (upper 4 bits = satélites)
+      const latRaw       = packet.readUInt32BE(11);
+      const lonRaw       = packet.readUInt32BE(15);
+      const speedKnots   = packet[19]!;
+      const courseStatus = packet.readUInt16BE(20);
+
+      // Bits específicos do firmware J14 / protocolo 0x12
+      const gpsFixed = (courseStatus >> 14) & 1; // bit 14
+      const latSouth = (courseStatus >> 12) & 1; // bit 12
+      const lonWest  = (courseStatus >> 11) & 1; // bit 11
+
+      respond();
+
+      if (!gpsFixed) {
+        logger.warn({ remoteAddr, imei: state.imei, courseStatus: `0x${courseStatus.toString(16)}` }, "GT06 (0x12): GPS sem fix — localização não salva");
+        break;
+      }
+
+      const latitude   = (latSouth ? -1 : 1) * (latRaw  / 1_800_000);
+      const longitude  = (lonWest  ? -1 : 1) * (lonRaw  / 1_800_000);
+      const velocidade = Math.round(speedKnots * 1.852 * 10) / 10;
+      const data_gps   = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+
+      logger.info(
+        { remoteAddr, imei: state.imei, latitude, longitude, velocidade, data_gps },
+        "GT06 (0x12): localização GPS+LBS válida"
+      );
+
+      if (!state.imei) {
+        logger.warn({ remoteAddr }, "GT06 (0x12): IMEI não recebido — localização descartada");
+        break;
+      }
+
+      saveLocalizacao({
+        imei:     state.imei,
+        latitude,
+        longitude,
+        velocidade,
+        data_gps,
+        raw_data: packet.toString("hex"),
+      }).catch((err) => logger.error({ err, imei: state.imei }, "GT06 (0x12): erro ao salvar"));
+
+      break;
+    }
+
+    // ── GPS+LBS variantes 0x10 e 0x11 ───────────────────────────────
     case PROTOCOL_GPS_LBS_1:
     case PROTOCOL_GPS_LBS_2: {
       logger.info(
         { remoteAddr, imei: state.imei, protocol: `0x${protocol.toString(16).padStart(2, "0")}` },
-        "GT06: GPS+LBS — respondendo"
+        "GT06: GPS+LBS variante — respondendo"
       );
       respond();
       break;
