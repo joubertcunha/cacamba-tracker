@@ -63,9 +63,14 @@ function parseImeiFromBcd(buf: Buffer, offset: number): string {
 
 // ── Constantes de protocolo ───────────────────────────────────────────────────
 
-const PROTOCOL_LOGIN     = 0x01;
-const PROTOCOL_GPS       = 0x22;
-const PROTOCOL_HEARTBEAT = 0x23;
+const PROTOCOL_LOGIN       = 0x01;
+const PROTOCOL_GPS         = 0x22;
+const PROTOCOL_HEARTBEAT   = 0x23;
+const PROTOCOL_STATUS_INFO = 0x13; // bateria, sinal GSM, alarme
+const PROTOCOL_GPS_LBS_1   = 0x10; // GPS+LBS (variante)
+const PROTOCOL_GPS_LBS_2   = 0x11; // GPS+LBS (variante)
+const PROTOCOL_ALARM       = 0x16; // alarme/alerta
+const PROTOCOL_GPS_2       = 0x26; // GPS (variante de alguns firmwares)
 
 // ── Estado por conexão ────────────────────────────────────────────────────────
 
@@ -219,11 +224,85 @@ function processGT06Packet(
       break;
     }
 
+    // ── Status / Informação (bateria, sinal GSM, alarme) ────────────
+    case PROTOCOL_STATUS_INFO: {
+      // Conteúdo: [voltagem][sinal GSM][status alarme][idioma]
+      const voltage = packet[4] ?? 0;
+      const signal  = packet[5] ?? 0;
+      logger.info(
+        { remoteAddr, imei: state.imei, voltage, signal },
+        "GT06: status do dispositivo — respondendo"
+      );
+      respond();
+      break;
+    }
+
+    // ── GPS+LBS combinado (variantes 0x10 e 0x11) ───────────────────
+    case PROTOCOL_GPS_LBS_1:
+    case PROTOCOL_GPS_LBS_2: {
+      logger.info(
+        { remoteAddr, imei: state.imei, protocol: `0x${protocol.toString(16).padStart(2, "0")}` },
+        "GT06: GPS+LBS — respondendo"
+      );
+      respond();
+      break;
+    }
+
+    // ── Alarme ───────────────────────────────────────────────────────
+    case PROTOCOL_ALARM: {
+      logger.warn({ remoteAddr, imei: state.imei }, "GT06: alarme recebido — respondendo");
+      respond();
+      break;
+    }
+
+    // ── GPS variante 0x26 ────────────────────────────────────────────
+    case PROTOCOL_GPS_2: {
+      // Mesmo layout do 0x22
+      const year    = 2000 + packet[4]!;
+      const month   = packet[5]!;
+      const day     = packet[6]!;
+      const hour    = packet[7]!;
+      const minute  = packet[8]!;
+      const second  = packet[9]!;
+      const latRaw       = packet.readUInt32BE(11);
+      const lonRaw       = packet.readUInt32BE(15);
+      const speedKnots   = packet[19]!;
+      const courseStatus = packet.readUInt16BE(20);
+      const latSouth = (courseStatus >> 10) & 1;
+      const lonWest  = (courseStatus >> 11) & 1;
+      const gpsFixed = (courseStatus >> 13) & 1;
+
+      respond();
+
+      if (!gpsFixed) {
+        logger.warn({ remoteAddr, imei: state.imei }, "GT06 (0x26): GPS sem fix — localização não salva");
+        break;
+      }
+
+      const latitude   = (latSouth ? -1 : 1) * (latRaw  / 1_800_000);
+      const longitude  = (lonWest  ? -1 : 1) * (lonRaw  / 1_800_000);
+      const velocidade = Math.round(speedKnots * 1.852 * 10) / 10;
+      const data_gps   = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+
+      logger.info(
+        { remoteAddr, imei: state.imei, latitude, longitude, velocidade },
+        "GT06 (0x26): localização GPS válida"
+      );
+
+      if (state.imei) {
+        saveLocalizacao({
+          imei: state.imei, latitude, longitude, velocidade, data_gps,
+          raw_data: packet.toString("hex"),
+        }).catch((err) => logger.error({ err, imei: state.imei }, "GT06 (0x26): erro ao salvar"));
+      }
+      break;
+    }
+
     // ── Protocolo desconhecido ──────────────────────────────────────
     default: {
       logger.warn(
         { remoteAddr, protocol: `0x${protocol.toString(16).padStart(2, "0")}` },
-        "GT06: protocolo desconhecido — respondendo para manter conexão"
+        "GT06: protocolo não mapeado — respondendo para manter conexão"
       );
       respond();
     }
